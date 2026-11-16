@@ -4,3 +4,6 @@ sentence-transformers
 qdrant-client
 pillow
 python-dotenv
+fastapi
+uvicorn
+requests

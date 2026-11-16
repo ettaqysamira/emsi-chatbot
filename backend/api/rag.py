@@ -8,6 +8,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+import requests
+from dotenv import load_dotenv
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
 
@@ -20,8 +22,18 @@ from ingestion.embeddings import MODELE_IMAGES, embedding_texte  # noqa: E402
 from ingestion.vectordb import IMAGE_COLLECTION, TEXT_COLLECTION  # noqa: E402
 
 
+load_dotenv(BACKEND_DIR / ".env")
+
 TOP_K = 5
 RRF_K = 60
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+SYSTEM_PROMPT = (
+    "Tu es l'assistant officiel de l'EMSI. "
+    "Réponds uniquement à partir du contexte fourni. "
+    "Si l'information n'y figure pas, dis que tu ne la connais pas et "
+    "propose de contacter l'administration. "
+    "Réponds de façon claire et concise en français, et cite les pages sources."
+)
 
 
 def _creer_client() -> QdrantClient:
@@ -184,6 +196,147 @@ def rechercher_contexte(
         for rang, point in enumerate(points_images, start=1)
     ]
     return fusionner_rrf(resultats_textes, resultats_images, k=RRF_K)
+
+
+def construire_prompt_final(
+    question: str,
+    contexte: Sequence[Mapping[str, Any]],
+) -> str:
+    """Construit le prompt (5) avec uniquement le contexte textuel."""
+
+    return (
+        f"SYSTEM PROMPT:\n{SYSTEM_PROMPT}\n\n"
+        f"{_construire_contexte_et_question(question, contexte)}"
+    )
+
+
+def _construire_contexte_et_question(
+    question: str,
+    contexte: Sequence[Mapping[str, Any]],
+) -> str:
+    """Construit la partie contexte et question commune aux fournisseurs."""
+
+    blocs_texte = []
+    for resultat in contexte:
+        if resultat.get("type") != "text":
+            continue
+        texte = str(resultat.get("texte") or resultat.get("contenu") or "").strip()
+        if not texte:
+            continue
+        blocs_texte.append(
+            f"[Source : {resultat.get('source', 'inconnue')} | "
+            f"Page : {resultat.get('page', '?')}]\n{texte}"
+        )
+
+    contexte_textuel = "\n\n".join(blocs_texte)
+    if not contexte_textuel:
+        contexte_textuel = "Aucun contexte textuel pertinent n'a été trouvé."
+
+    return (
+        f"CONTEXTE:\n{contexte_textuel}\n\n"
+        f"QUESTION:\n{question.strip()}"
+    )
+
+
+def appeler_groq(messages: Sequence[Mapping[str, str]]) -> str:
+    """Appelle Groq avec des messages système et utilisateur."""
+
+    api_key = os.getenv("GROQ_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY est absente.")
+
+    response = requests.post(
+        GROQ_URL,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+            "messages": [dict(message) for message in messages],
+            "temperature": 0.2,
+        },
+        timeout=60,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    choices = payload.get("choices") or []
+    if not choices:
+        raise RuntimeError("Groq n'a renvoyé aucun choix.")
+
+    message = choices[0].get("message") or {}
+    answer = message.get("content")
+    if not isinstance(answer, str) or not answer.strip():
+        raise RuntimeError("Groq a renvoyé une réponse vide.")
+    return answer.strip()
+
+
+def _url_image_relative(chemin: str) -> str:
+    """Convertit un chemin local d'image en URL servie par FastAPI."""
+
+    return f"/images/{Path(chemin).name}"
+
+
+def _reponse_erreur(message: str) -> dict[str, Any]:
+    return {"answer": message, "sources": [], "images": []}
+
+
+def repondre(question: str) -> dict[str, Any]:
+    """Exécute (7) la recherche, la génération Groq et le format de réponse."""
+
+    question = question.strip()
+    if not question:
+        return _reponse_erreur("Veuillez fournir une question.")
+
+    try:
+        contexte = rechercher_contexte(question)
+    except Exception:
+        return _reponse_erreur(
+            "Le service de recherche Qdrant est indisponible. "
+            "Vérifiez que Qdrant est lancé et que les collections existent."
+        )
+
+    sources = [
+        {
+            "source": str(resultat.get("source", "source inconnue")),
+            "page": resultat.get("page", "?"),
+            "type": str(resultat.get("type", "text")),
+            "score": float(resultat.get("score", 0.0)),
+        }
+        for resultat in contexte
+    ]
+    images = []
+    for resultat in contexte:
+        if resultat.get("type") != "image":
+            continue
+        chemin = str(resultat.get("chemin_image") or resultat.get("contenu") or "")
+        if chemin and len(images) < 2:
+            images.append(_url_image_relative(chemin))
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": _construire_contexte_et_question(question, contexte),
+        },
+    ]
+    try:
+        answer = appeler_groq(messages)
+    except Exception as exc:
+        api_key = os.getenv("GROQ_API_KEY", "").strip()
+        message_erreur = str(exc)
+        if api_key:
+            message_erreur = message_erreur.replace(api_key, "[clé masquée]")
+        print(
+            f"Erreur Groq ({type(exc).__name__}) : {message_erreur}",
+            file=sys.stderr,
+        )
+        return _reponse_erreur(
+            "Le service Groq est indisponible ou sa limite d'utilisation "
+            "a été atteinte. Vérifiez GROQ_API_KEY et réessayez."
+        )
+
+    return {"answer": answer, "sources": sources, "images": images}
 
 
 if __name__ == "__main__":
