@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
+import 'package:speech_to_text/speech_recognition_error.dart';
+import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../api_config.dart';
@@ -12,10 +14,7 @@ class _SidebarToggleIcon extends StatelessWidget {
   final Color color;
   final double size;
 
-  const _SidebarToggleIcon({
-    this.color = Colors.white,
-    this.size = 19,
-  });
+  const _SidebarToggleIcon({this.color = Colors.white, this.size = 19});
 
   @override
   Widget build(BuildContext context) {
@@ -100,8 +99,13 @@ class _ChatPageState extends State<ChatPage> {
   bool _botTyping = false;
   bool _loadingMessages = false;
   bool _showSidebar = true;
-  bool _isDarkMode = true; // Actif par défaut sur le thème sombre officiel WhatsApp
+  bool _isDarkMode =
+      true; // Actif par défaut sur le thème sombre officiel WhatsApp
+  bool _speechAvailable = false;
+  bool _isListening = false;
   double _sidebarWidth = 260.0;
+
+  final stt.SpeechToText _speech = stt.SpeechToText();
 
   List<_Conversation> _conversations = [];
   String? _currentConversationId;
@@ -116,13 +120,92 @@ class _ChatPageState extends State<ChatPage> {
     super.initState();
     _resetToWelcomeMessage();
     _loadConversations();
+    _initialiserReconnaissanceVocale();
   }
 
   @override
   void dispose() {
+    _speech.cancel();
     _controller.dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+
+  Future<void> _initialiserReconnaissanceVocale() async {
+    final disponible = await _speech.initialize(
+      onStatus: _onSpeechStatus,
+      onError: _onSpeechError,
+    );
+    if (!mounted) return;
+
+    setState(() => _speechAvailable = disponible);
+    if (!disponible) {
+      _showSpeechMessage(
+        'La reconnaissance vocale n’est pas disponible ou la permission est refusée.',
+      );
+    }
+  }
+
+  void _onSpeechStatus(String status) {
+    if (!mounted) return;
+    if (status == 'listening') {
+      setState(() => _isListening = true);
+    } else if (status == 'done' || status == 'notListening') {
+      setState(() => _isListening = false);
+    }
+  }
+
+  void _onSpeechError(SpeechRecognitionError error) {
+    if (!mounted) return;
+    setState(() => _isListening = false);
+    _showSpeechMessage(
+      'Reconnaissance vocale indisponible : ${error.errorMsg}',
+    );
+  }
+
+  void _showSpeechMessage(String message) {
+    if (!mounted) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(message)));
+    });
+  }
+
+  Future<void> _toggleSpeech() async {
+    if (!_speechAvailable) {
+      _showSpeechMessage(
+        'La reconnaissance vocale n’est pas disponible sur cet appareil.',
+      );
+      return;
+    }
+
+    if (_speech.isListening || _isListening) {
+      await _speech.stop();
+      if (mounted) setState(() => _isListening = false);
+      return;
+    }
+
+    try {
+      setState(() => _isListening = true);
+      await _speech.listen(
+        onResult: (result) {
+          if (!mounted) return;
+          setState(() {
+            _controller.text = result.recognizedWords;
+            _controller.selection = TextSelection.collapsed(
+              offset: _controller.text.length,
+            );
+          });
+        },
+        localeId: 'fr_FR',
+        partialResults: true,
+      );
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _isListening = false);
+      _showSpeechMessage('Impossible de démarrer la reconnaissance vocale.');
+    }
   }
 
   void _resetToWelcomeMessage() {
@@ -147,37 +230,71 @@ class _ChatPageState extends State<ChatPage> {
   static const Color _signatureGreen = Color(0xFF134D37);
 
   // Thème Sombre
-  static const Color _waChatDark = Color(0xFF191919);       // Fond de discussion sombre
-  static const Color _waSidebarDark = Color(0xFF202020);    // Sidebar gauche sombre
-  static const Color _waBotBubbleDark = Color(0xFF222222);  // Bulle reçue gris anthracite WhatsApp
-  static const Color _waInputBarDark = Color(0xFF1E1E1E);   // Barre de saisie en bas
+  static const Color _waChatDark = Color(
+    0xFF191919,
+  ); // Fond de discussion sombre
+  static const Color _waSidebarDark = Color(
+    0xFF202020,
+  ); // Sidebar gauche sombre
+  static const Color _waBotBubbleDark = Color(
+    0xFF222222,
+  ); // Bulle reçue gris anthracite WhatsApp
+  static const Color _waInputBarDark = Color(
+    0xFF1E1E1E,
+  ); // Barre de saisie en bas
   static const Color _waInputFieldDark = Color(0xFF2A2A2A); // Champ de texte
-  static const Color _waAccentGreen = Color(0xFF23C768);    // Vert vibrant WhatsApp (icônes)
-  static const Color _waTextLight = Color(0xFFFFFFFF);      // Texte blanc principal
-  static const Color _waTextMuted = Color(0xFF8696A0);      // Horodatage & textes secondaires
-  static const Color _waBorderDark = Color(0xFF282828);     // Lignes de séparation discrètes
-  static const Color _waBlueCheck = Color(0xFF53BDEB);      // Double coches bleues officielles
+  static const Color _waAccentGreen = Color(
+    0xFF23C768,
+  ); // Vert vibrant WhatsApp (icônes)
+  static const Color _waTextLight = Color(0xFFFFFFFF); // Texte blanc principal
+  static const Color _waTextMuted = Color(
+    0xFF8696A0,
+  ); // Horodatage & textes secondaires
+  static const Color _waBorderDark = Color(
+    0xFF282828,
+  ); // Lignes de séparation discrètes
+  static const Color _waBlueCheck = Color(
+    0xFF53BDEB,
+  ); // Double coches bleues officielles
 
   // Thème Clair
-  static const Color _waChatLight = Color(0xFFFAF9F6);       // Fond de discussion clair épuré
-  static const Color _waSidebarLight = Color(0xFFF3EFE6);    // Sidebar en beige doux élégant
-  static const Color _waBotBubbleLight = Color(0xFFFFFFFF);  // Bulle réponse blanche
-  static const Color _waInputBarLight = Color(0xFFF3EFE6);   // Barre de saisie beige
-  static const Color _waInputFieldLight = Color(0xFFFFFFFF); // Champ de texte blanc
-  static const Color _waBorderLight = Color(0xFFE2DDD2);     // Ligne séparatrice beige discrète
+  static const Color _waChatLight = Color(
+    0xFFFAF9F6,
+  ); // Fond de discussion clair épuré
+  static const Color _waSidebarLight = Color(
+    0xFFF3EFE6,
+  ); // Sidebar en beige doux élégant
+  static const Color _waBotBubbleLight = Color(
+    0xFFFFFFFF,
+  ); // Bulle réponse blanche
+  static const Color _waInputBarLight = Color(
+    0xFFF3EFE6,
+  ); // Barre de saisie beige
+  static const Color _waInputFieldLight = Color(
+    0xFFFFFFFF,
+  ); // Champ de texte blanc
+  static const Color _waBorderLight = Color(
+    0xFFE2DDD2,
+  ); // Ligne séparatrice beige discrète
 
   Color get _chatBg => _isDarkMode ? _waChatDark : _waChatLight;
   Color get _sidebarBg => _isDarkMode ? _waSidebarDark : _waSidebarLight;
-  Color get _headerBg => _signatureGreen; // Même vert en haut ruban (Dark et Light)
-  Color get _userBubbleBg => _signatureGreen; // Même vert pour messages (Dark et Light)
+  Color get _headerBg =>
+      _signatureGreen; // Même vert en haut ruban (Dark et Light)
+  Color get _userBubbleBg =>
+      _signatureGreen; // Même vert pour messages (Dark et Light)
   Color get _userTextColor => Colors.white;
   Color get _botBubbleBg => _isDarkMode ? _waBotBubbleDark : _waBotBubbleLight;
-  Color get _botTextColor => _isDarkMode ? _waTextLight : const Color(0xFF111B21);
+  Color get _botTextColor =>
+      _isDarkMode ? _waTextLight : const Color(0xFF111B21);
   Color get _inputBarBg => _isDarkMode ? _waInputBarDark : _waInputBarLight;
-  Color get _inputFieldBg => _isDarkMode ? _waInputFieldDark : _waInputFieldLight;
-  Color get _inputTextColor => _isDarkMode ? _waTextLight : const Color(0xFF111B21);
+  Color get _inputFieldBg =>
+      _isDarkMode ? _waInputFieldDark : _waInputFieldLight;
+  Color get _inputTextColor =>
+      _isDarkMode ? _waTextLight : const Color(0xFF111B21);
   Color get _border => _isDarkMode ? _waBorderDark : _waBorderLight;
-  Color get _timeTextColor => _isDarkMode ? _waTextMuted : const Color(0xFF667781);
+  Color get _timeTextColor =>
+      _isDarkMode ? _waTextMuted : const Color(0xFF667781);
 
   // ==========================================
   // Gestion Supabase : Conversations & Messages
@@ -204,7 +321,8 @@ class _ChatPageState extends State<ChatPage> {
               _Conversation(
                 id: (row['id'] ?? '').toString(),
                 title: (row['title'] ?? 'Discussion').toString(),
-                createdAt: DateTime.tryParse(row['created_at']?.toString() ?? '')
+                createdAt:
+                    DateTime.tryParse(row['created_at']?.toString() ?? '')
                         ?.toLocal() ??
                     DateTime.now(),
               ),
@@ -268,7 +386,8 @@ class _ChatPageState extends State<ChatPage> {
               _ChatMessage(
                 text: (row['text'] ?? '').toString(),
                 isUser: row['is_user'] == true,
-                time: DateTime.tryParse(row['created_at']?.toString() ?? '')
+                time:
+                    DateTime.tryParse(row['created_at']?.toString() ?? '')
                         ?.toLocal() ??
                     DateTime.now(),
                 sourceLine: row['source_line']?.toString(),
@@ -312,7 +431,9 @@ class _ChatPageState extends State<ChatPage> {
     if (user == null) return null;
 
     final trimmed = firstQuestion.trim();
-    final title = trimmed.length > 32 ? '${trimmed.substring(0, 32)}...' : trimmed;
+    final title = trimmed.length > 32
+        ? '${trimmed.substring(0, 32)}...'
+        : trimmed;
 
     try {
       final res = await Supabase.instance.client
@@ -563,7 +684,11 @@ class _ChatPageState extends State<ChatPage> {
                           icon: CircleAvatar(
                             backgroundColor: Colors.black.withOpacity(0.6),
                             radius: 18,
-                            child: const Icon(Icons.close, color: Colors.white, size: 18),
+                            child: const Icon(
+                              Icons.close,
+                              color: Colors.white,
+                              size: 18,
+                            ),
                           ),
                           onPressed: () => Navigator.pop(context),
                         ),
@@ -586,7 +711,10 @@ class _ChatPageState extends State<ChatPage> {
                     width: 220,
                     height: 140,
                     child: Center(
-                      child: CircularProgressIndicator(strokeWidth: 2, color: _waAccentGreen),
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: _waAccentGreen,
+                      ),
                     ),
                   );
                 },
@@ -867,9 +995,7 @@ class _ChatPageState extends State<ChatPage> {
       width: _sidebarWidth,
       decoration: BoxDecoration(
         color: _sidebarBg,
-        border: Border(
-          right: BorderSide(color: _border, width: 1),
-        ),
+        border: Border(right: BorderSide(color: _border, width: 1)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -895,7 +1021,10 @@ class _ChatPageState extends State<ChatPage> {
               borderRadius: BorderRadius.circular(8),
               onTap: _startNewChat,
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
+                ),
                 decoration: BoxDecoration(
                   color: _userBubbleBg, // Même vert foncé élégant que la bulle de message
                   borderRadius: BorderRadius.circular(8),
@@ -948,15 +1077,15 @@ class _ChatPageState extends State<ChatPage> {
                       padding: const EdgeInsets.all(16.0),
                       child: Text(
                         'Aucune discussion passée',
-                        style: TextStyle(
-                          color: _timeTextColor,
-                          fontSize: 12,
-                        ),
+                        style: TextStyle(color: _timeTextColor, fontSize: 12),
                       ),
                     ),
                   )
                 : ListView.builder(
-                    padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 6),
+                    padding: const EdgeInsets.symmetric(
+                      vertical: 2,
+                      horizontal: 6,
+                    ),
                     itemCount: _conversations.length,
                     itemBuilder: (context, index) {
                       final conv = _conversations[index];
@@ -966,19 +1095,25 @@ class _ChatPageState extends State<ChatPage> {
                         margin: const EdgeInsets.only(bottom: 2),
                         decoration: BoxDecoration(
                           color: isSelected
-                              ? (_isDarkMode ? const Color(0xFF2A3942) : const Color(0xFFE5DEC9))
+                              ? (_isDarkMode
+                                    ? const Color(0xFF2A3942)
+                                    : const Color(0xFFE5DEC9))
                               : Colors.transparent,
                           borderRadius: BorderRadius.circular(8),
                         ),
                         child: ListTile(
                           dense: true,
                           visualDensity: const VisualDensity(vertical: -3),
-                          contentPadding: const EdgeInsets.symmetric(horizontal: 10),
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                          ),
                           leading: Container(
                             width: 7,
                             height: 7,
                             decoration: BoxDecoration(
-                              color: isSelected ? _userBubbleBg : _timeTextColor,
+                              color: isSelected
+                                  ? _userBubbleBg
+                                  : _timeTextColor,
                               shape: BoxShape.circle,
                             ),
                           ),
@@ -987,8 +1122,12 @@ class _ChatPageState extends State<ChatPage> {
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
-                              color: _isDarkMode ? _waTextLight : const Color(0xFF111B21),
-                              fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
+                              color: _isDarkMode
+                                  ? _waTextLight
+                                  : const Color(0xFF111B21),
+                              fontWeight: isSelected
+                                  ? FontWeight.w600
+                                  : FontWeight.w400,
                               fontSize: 13.5,
                             ),
                           ),
@@ -996,7 +1135,11 @@ class _ChatPageState extends State<ChatPage> {
                               ? IconButton(
                                   padding: EdgeInsets.zero,
                                   constraints: const BoxConstraints(),
-                                  icon: Icon(Icons.delete_outline, size: 16, color: _timeTextColor),
+                                  icon: Icon(
+                                    Icons.delete_outline,
+                                    size: 16,
+                                    color: _timeTextColor,
+                                  ),
                                   tooltip: 'Supprimer',
                                   onPressed: () => _deleteConversation(conv.id),
                                 )
@@ -1019,16 +1162,23 @@ class _ChatPageState extends State<ChatPage> {
                 CircleAvatar(
                   radius: 14,
                   backgroundColor: _waAccentGreen.withOpacity(0.2),
-                  child: const Icon(Icons.person_outline, size: 16, color: _waAccentGreen),
+                  child: const Icon(
+                    Icons.person_outline,
+                    size: 16,
+                    color: _waAccentGreen,
+                  ),
                 ),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    Supabase.instance.client.auth.currentUser?.email ?? 'Étudiant EMSI',
+                    Supabase.instance.client.auth.currentUser?.email ??
+                        'Étudiant EMSI',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      color: _isDarkMode ? _waTextLight : const Color(0xFF111B21),
+                      color: _isDarkMode
+                          ? _waTextLight
+                          : const Color(0xFF111B21),
                       fontSize: 12.5,
                       fontWeight: FontWeight.w500,
                     ),
@@ -1100,19 +1250,16 @@ class _ChatPageState extends State<ChatPage> {
         behavior: HitTestBehavior.translucent,
         onHorizontalDragUpdate: (details) {
           setState(() {
-            _sidebarWidth =
-                (_sidebarWidth + details.delta.dx).clamp(200.0, 480.0);
+            _sidebarWidth = (_sidebarWidth + details.delta.dx).clamp(
+              200.0,
+              480.0,
+            );
           });
         },
         child: Container(
           width: 5,
           color: _sidebarBg,
-          child: Center(
-            child: Container(
-              width: 1,
-              color: _border,
-            ),
-          ),
+          child: Center(child: Container(width: 1, color: _border)),
         ),
       ),
     );
@@ -1134,11 +1281,10 @@ class _ChatPageState extends State<ChatPage> {
         titleSpacing: 0,
         shape: Border(bottom: BorderSide(color: _border, width: 1)),
         leading: IconButton(
-          icon: const _SidebarToggleIcon(
-            color: Colors.white,
-            size: 19,
-          ),
-          tooltip: _showSidebar ? 'Masquer la barre latérale' : 'Afficher la barre latérale',
+          icon: const _SidebarToggleIcon(color: Colors.white, size: 19),
+          tooltip: _showSidebar
+              ? 'Masquer la barre latérale'
+              : 'Afficher la barre latérale',
           onPressed: () => setState(() => _showSidebar = !_showSidebar),
         ),
         title: Row(
@@ -1160,10 +1306,7 @@ class _ChatPageState extends State<ChatPage> {
                   _currentConversationId == null
                       ? 'En ligne'
                       : 'Discussion active',
-                  style: const TextStyle(
-                    fontSize: 11,
-                    color: Colors.white70,
-                  ),
+                  style: const TextStyle(fontSize: 11, color: Colors.white70),
                 ),
               ],
             ),
@@ -1172,18 +1315,19 @@ class _ChatPageState extends State<ChatPage> {
         actions: [
           IconButton(
             icon: Icon(
-              _isDarkMode ? Icons.wb_sunny_outlined : Icons.nightlight_round_outlined,
+              _isDarkMode
+                  ? Icons.wb_sunny_outlined
+                  : Icons.nightlight_round_outlined,
               color: Colors.white,
               size: 20,
             ),
-            tooltip: _isDarkMode ? 'Passer en mode clair' : 'Passer en mode sombre',
+            tooltip: _isDarkMode
+                ? 'Passer en mode clair'
+                : 'Passer en mode sombre',
             onPressed: () => setState(() => _isDarkMode = !_isDarkMode),
           ),
           IconButton(
-            icon: const Icon(
-              Icons.add_comment_outlined,
-              color: Colors.white,
-            ),
+            icon: const Icon(Icons.add_comment_outlined, color: Colors.white),
             tooltip: 'Nouvelle discussion',
             onPressed: _startNewChat,
           ),
@@ -1193,10 +1337,7 @@ class _ChatPageState extends State<ChatPage> {
       body: Row(
         children: [
           // Barre latérale gauche pliable & redimensionnable
-          if (_showSidebar) ...[
-            _buildSidebar(),
-            _buildResizeHandle(),
-          ],
+          if (_showSidebar) ...[_buildSidebar(), _buildResizeHandle()],
 
           // Zone principale de chat WhatsApp
           Expanded(
@@ -1206,11 +1347,16 @@ class _ChatPageState extends State<ChatPage> {
                 Expanded(
                   child: _loadingMessages
                       ? Center(
-                          child: CircularProgressIndicator(color: _waAccentGreen),
+                          child: CircularProgressIndicator(
+                            color: _waAccentGreen,
+                          ),
                         )
                       : ListView.builder(
                           controller: _scrollController,
-                          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+                          padding: const EdgeInsets.symmetric(
+                            vertical: 10,
+                            horizontal: 8,
+                          ),
                           itemCount: _messages.length + (_botTyping ? 1 : 0),
                           itemBuilder: (context, index) {
                             if (_botTyping && index == _messages.length) {
@@ -1224,7 +1370,10 @@ class _ChatPageState extends State<ChatPage> {
                 // Barre de saisie style WhatsApp officiel
                 Container(
                   color: _inputBarBg,
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 8,
+                  ),
                   child: SafeArea(
                     child: Row(
                       children: [
@@ -1247,12 +1396,13 @@ class _ChatPageState extends State<ChatPage> {
                               textCapitalization: TextCapitalization.sentences,
                               maxLines: 4,
                               minLines: 1,
-                              style: TextStyle(color: _inputTextColor, fontSize: 15),
+                              style: TextStyle(
+                                color: _inputTextColor,
+                                fontSize: 15,
+                              ),
                               decoration: InputDecoration(
                                 hintText: 'Entrez un message...',
-                                hintStyle: TextStyle(
-                                  color: _timeTextColor,
-                                ),
+                                hintStyle: TextStyle(color: _timeTextColor),
                                 border: InputBorder.none,
                                 contentPadding: const EdgeInsets.symmetric(
                                   horizontal: 16,
@@ -1264,12 +1414,28 @@ class _ChatPageState extends State<ChatPage> {
                           ),
                         ),
                         const SizedBox(width: 8),
+                        IconButton(
+                          icon: Icon(
+                            _isListening ? Icons.stop : Icons.mic,
+                            color: _isListening ? Colors.red : _timeTextColor,
+                            size: 24,
+                          ),
+                          tooltip: _isListening
+                              ? 'Arrêter l’écoute'
+                              : 'Dicter une question',
+                          onPressed: _toggleSpeech,
+                        ),
+                        const SizedBox(width: 4),
                         GestureDetector(
                           onTap: _sendMessage,
                           child: CircleAvatar(
                             radius: 22,
                             backgroundColor: _userBubbleBg,
-                            child: const Icon(Icons.send, color: Colors.white, size: 20),
+                            child: const Icon(
+                              Icons.send,
+                              color: Colors.white,
+                              size: 20,
+                            ),
                           ),
                         ),
                       ],
