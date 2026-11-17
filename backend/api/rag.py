@@ -26,13 +26,14 @@ load_dotenv(BACKEND_DIR / ".env")
 
 TOP_K = 5
 RRF_K = 60
+IMAGE_MIN_SCORE_DEFAULT = 0.25  # À calibrer selon les scores CLIP observés.
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 SYSTEM_PROMPT = (
     "Tu es l'assistant officiel de l'EMSI. "
     "Réponds uniquement à partir du contexte fourni. "
     "Si l'information n'y figure pas, dis que tu ne la connais pas et "
     "propose de contacter l'administration. "
-    "Réponds de façon claire et concise en français, et cite les pages sources."
+    "Réponds de façon claire et concise en français."
 )
 
 
@@ -277,6 +278,15 @@ def _url_image_relative(chemin: str) -> str:
     return f"/images/{Path(chemin).name}"
 
 
+def _image_min_score() -> float:
+    try:
+        return float(
+            os.getenv("IMAGE_MIN_SCORE", str(IMAGE_MIN_SCORE_DEFAULT))
+        )
+    except ValueError:
+        return IMAGE_MIN_SCORE_DEFAULT
+
+
 def _reponse_erreur(message: str) -> dict[str, Any]:
     return {"answer": message, "sources": [], "images": []}
 
@@ -306,8 +316,11 @@ def repondre(question: str) -> dict[str, Any]:
         for resultat in contexte
     ]
     images = []
+    image_min_score = _image_min_score()
     for resultat in contexte:
         if resultat.get("type") != "image":
+            continue
+        if float(resultat.get("qdrant_score", 0.0)) < image_min_score:
             continue
         chemin = str(resultat.get("chemin_image") or resultat.get("contenu") or "")
         if chemin and len(images) < 2:
